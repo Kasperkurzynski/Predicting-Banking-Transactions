@@ -1,0 +1,1543 @@
+---
+title: "Wybór najlepszego modelu do predykcji zmiennych dotyczących transakcji bankowych"
+author: "Kasper Kurzyński"
+date: "13.02.2022"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    theme: "cerulean"
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      fig.align = "center")
+```
+
+![](banking.jpg)
+
+## **Wstęp**
+
+Zbiór zawiera następujące zmienne:
+
+* **id** - id transakcji
+* **initialtransaction_id** - id transakcji inicjalizującej
+* **createtime** - data i czas utworzenia transakcji
+* **amount** - kwota przelewu
+* **browseragent** - przeglądarka klienta
+* **description** - tytuł płatności
+* **recurringaction** - informacja o rodzaju płatności rekurencyjnej
+* **screenheight** - wysokość ekranu urządzenia klienta
+* **screenwidth** - szerokość ekranu urządzenia klienta
+* **acquirerconnectionmethod** - sposób łączenia się (zmienna techniczna)
+* **expirymonth** - miesiąc wygaśnięcia karty
+* **expiryyear** - rok wygaśnięcia karty
+* **issuer** - wystawca karty
+* **type** - rodzaj karty
+* **level** - klasa karty
+* **countrycode** - kraj wydania karty
+* **listtype** - sektor działania partnera
+* **mccname** - nazwa branży w jakiej działa partner
+* **payclickedtime** - data i czas potwierdzenia transakcji przez klienta po uzupełnieniu danych kartowych
+* **status** - status płatności
+
+Celem projektu jest zbudowanie oraz wskazanie najlepszego modelu predykcyjnego dla zmiennej jakościowej wskazującej czy transakcja rekurencyjna jest udana - **status**, a także zbudowanie oraz wskazanie najlepszego modelu predykcyjnego dla zmiennej ilościowej **amount**.
+
+
+___
+
+## **Wczytanie danych oraz odpowiednich bibliotek potrzebnych do zrealizowania projektu**
+
+Do realizacji projektu zostały wykorzystane poniższe biblioteki. Między innymi użyto takich pakietów jak "dplyr", "randomForest" lub "rpart".
+
+```{r include=TRUE}
+setwd("C:/Users/Kasper/OneDrive/Pulpit/Applied Statistics/mn_workshop")
+load("dane_zaliczenie.RData")
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(tree)
+library(earth)
+library(rpart)
+library(rpart.plot)
+library(adabag) 
+library(randomForestSRC)
+library(randomForest)
+library(caTools)
+library(pander)
+library(wrapr)
+library(adabag)
+library(Hmisc)
+library(tidyverse)
+library(caret)
+library(leaps)
+library(kableExtra)
+library(extrafont)
+panderOptions("plain.ascii", TRUE)
+panderOptions("keep.trailing.zeros", TRUE)
+panderOptions("table.style", "simple")
+perf_justify <- "lrrr"
+```
+
+___
+
+## **Przygotowanie danych do zadania 1.**
+
+### Utworzenie próby walidacyjnej
+
+Próba walidacyjna została utworzona w celu dokonania oceny szacowanych modeli, ponieważ w pierwotnej próbie testowej zmienne zależne nie występowały.
+
+```{r}
+set.seed(100) 
+n <- nrow(proba_uczaca)
+liczby_dzielace <- sample(c(1:n), round(0.75*n), replace = FALSE)
+
+nowa_uczaca <- proba_uczaca[liczby_dzielace,]
+proba_walidacyjna <- proba_uczaca[-liczby_dzielace,]
+```
+
+### Eksploracja danych - próba ucząca
+
+Obiektem badania są transakcje rekurencyjne (transakcje dotyczące zarejestrowanej karty). Posiadają one warianty: AUTO lub MANUAL, w zbiorze danych "proba_uczaca" występuje tylko wariant pierwszy, dlatego ze zbioru danych "proba_testowa" wariant drugi (3 obserwacje) został wykluczony.
+
+Większość zmiennych w zbiorze zaklasyfikowana jest jako "character" - poniżej zostały one przekonwertowane na zmienne jakościowe ("factor"). Występuje tylko jedna zmienna ilościowa wyrażona na skali ilorazowej - **amount**. Co więcej, warianty zmiennej **description**: "" oraz "NA" zostały ujednolicone i zastąpione wariantem "Brak opisu". Tak jak wspomniano wyżej, obiektem badania są transakcje rekurencyjne, dlatego usunięto wszystkie warianty zmiennej **recurringaction** z wyjątkiem "AUTO" (wariant "MANUAL" nie występuje w zbiorze "proba_uczaca").
+
+Tak jak wspomniano wyżej, obiektem badania są transakcje rekurencyjne, dlatego usunięto wszystkie warianty zmiennej **recurringaction** z wyjątkiem "AUTO" (wariant "MANUAL" nie występuje w zbiorze "proba_uczaca"). Po nałożeniu filtra na transakcje rekurencyjne zmienna **recurringaction** została usunięta ze zbioru danych. 
+
+Zmienna **status** została zredukowana do dwóch wariantów: "success" (pierwotnie "completed successfully"), oraz "fail" (na którą składają się warianty: "card limit exceeded" "bank declined", "do not honor", oraz "NA"). Dodatkowo uwzględniono zmienną określającą dzień tygodnia, w którym miała miejsce transakcja - **weekDay**, która została stworzona na podstawie zmiennej **createtime**.
+
+```{r}
+head(nowa_uczaca)
+tail(nowa_uczaca)
+str(nowa_uczaca)
+summary(nowa_uczaca)
+```
+
+### Transformacja danych
+
+Poniżej przedstawiono szereg operacji mający na celu przygotowanie próby uczącej do dalszych analiz.
+
+```{r}
+nowa_uczaca$description <- ifelse(nowa_uczaca$description == "", "Brak opisu", nowa_uczaca$description)
+nowa_uczaca$description <- ifelse(is.na(nowa_uczaca$description), "Brak opisu", nowa_uczaca$description)
+
+nowa_uczaca <- nowa_uczaca %>%
+  select(id, createtime, amount, description, recurringaction, acquirerconnectionmethod, expirymonth, expiryyear, issuer, 
+         type, level, countrycode, listtype, mccname, status) %>%
+  filter(recurringaction == "AUTO") %>%
+  mutate(acquirerconnectionmethod = factor(acquirerconnectionmethod),
+         expirymonth = factor(expirymonth),
+         description = factor(description),
+         expiryyear = factor(expiryyear),
+         issuer = factor(issuer),
+         type = factor(type),
+         level = factor(level),
+         countrycode = factor(countrycode),
+         listtype = factor(listtype),
+         mccname = factor(mccname))
+
+nowa_uczaca$recurringaction <- NULL
+
+nowa_uczaca$weekDay <- weekdays(as.Date(nowa_uczaca$createtime))
+nowa_uczaca$weekDay <- as.factor(nowa_uczaca$weekDay)
+nowa_uczaca$status <- ifelse(nowa_uczaca$status == "completed successfully", "success", "fail")
+nowa_uczaca$status <- as.factor(nowa_uczaca$status)
+
+nowa_uczaca$weekDay <- factor(nowa_uczaca$weekDay, levels= c("poniedziałek", "wtorek", 
+                                         "środa", "czwartek", "piątek", "sobota", "niedziela"))
+
+
+```
+
+### Podsumowanie zmian
+
+Skutkiem transformacji było między innymi zamienienie typu zmiennych na **factor**.
+
+```{r}
+str(nowa_uczaca)
+summary(nowa_uczaca)
+```
+
+### Wizualizacja danych na podstawie nowej próby uczącej
+
+W przypadku zmiennej zależnej **success** liczba transakcji udanych jest znacząco większa niż liczba transakcji nieudanych - stanowi ona 80% wszystkich uwzględnionych w badaniu obserwacji.
+
+Podobne dysproporcje obserwuje się w przypadku zmiennej **type** - 2664 obserwacje dotyczą transakcji z wykorzystaniem kart kredytowych, a aż 16367 obserwacji to transakcje z wykorzystaniem kart debetowych. Rozkład zmiennej **expiryyear** jest najbardziej zbliżony do rozkładu normalnego (jeśliby wykluczyć obserwacje nietypowe tj. utratę ważności karty w latach 2027-2029, która występuje tylko w przypadku 0,26% wszystkich obserwacji). Jeśli chodzi o zmienną **weekDay**, najwięcej transakcji dokonywanych jest w poniedziałek i w miarę upływu tygodnia ich liczba stopniowo się zmniejsza (z wyjątkiem piątku, dla którego wartość zmiennej nieco wzrasta).
+
+W przypadku zmiennej **mccname** znaczna większość obserwacji dotyczy "usług biznesowych nigdzie indziej niesklasyfikowanych". Spośród sklasyfikowanych usług największą licznę obserwacji stanowią "sieci komputerowe, usługi informacyjne". Pozostałe warianty zmiennej mają znacząco mniejsze liczebności. Wystawcą karty (zmienna **issuer**) najczęściej jest "VISA" (10278 obserwacji), choć wariant "MASTERCARD" jest niewiele mniej liczny (8737 obserwacji), zaś transakcje z użyciem karty "MAESTRO" to tylko 16 obserwacji i mogą one zostać wykluczone. W przypadku 15584 obserwacji sektor działania partnera biznesowego (zmienna **listtype**) to "ECOMMERCE", pozostałe znacznie mniej liczne warianty to "MFW" oraz "PUBLIC".
+
+Histogramy dla każdej z uwzględnionych na wykresach zmiennych (**amount**, **amount** x **fail**, **amount** x **success**, **amount** x **CREDIT**, **amount** x **DEBIT**, **amount** x **ECOMMERCE**, **amount** x **MWF**, **amount** x **MASTERCARD**, **amount** x **VISA**) wskazują na wysoką asymetrię prawostronną, co może wskazywać na występowanie jednostek odstających o wysokich wartościach.
+
+```{r}
+plotStat <- nowa_uczaca %>%
+  count(status) %>%
+  ggplot() + geom_col(aes(x = status, y = n, fill = status), alpha = 0.8) +
+  geom_label(aes(x = status, y = n, label = n)) +
+  scale_fill_manual(values = c("tomato3","royalblue2")) +
+  theme_minimal() +
+  ggtitle('Liczba nieudanych i udanych transakcji') + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x=element_blank(),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=8),
+        legend.position = "right",
+        legend.justification = c(0.94,0.94),
+        legend.background = element_rect(fill="gray90",
+                                         size=0.5, linetype="solid", 
+                                         colour ="gray10"),
+        plot.title = element_text(color="gray10", size=22, family="serif"))
+
+
+#Type
+plotType <- nowa_uczaca %>%
+  count(type) %>%
+  ggplot() + geom_col(aes(x = type, y = n, fill = type), alpha = 0.8) +
+  geom_label(aes(x = type, y = n, label = n)) +
+  scale_fill_manual(values = c("deepskyblue2","darkorange2")) +
+  theme_minimal() +
+  ggtitle('Liczba transakcji w zależności od typu karty') + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x=element_blank(),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=22, family="serif"))
+
+#Expiryyear
+plotExpy <- nowa_uczaca %>%
+  count(expiryyear) %>%
+  ggplot() + geom_col(aes(x = expiryyear, y = n, fill = expiryyear), alpha = 0.8) +
+  geom_label(aes(x = expiryyear, y = n, label = n)) +
+  scale_fill_manual(values = c("violetred4","seagreen4", "goldenrod4", "lightskyblue4", "sienna4",
+                               "violetred2","seagreen2", "goldenrod2", "lightskyblue2", "sienna2")) +
+  theme_minimal() +
+  ggtitle("Rok utraty ważności karty") + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x=element_blank(),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=22, family="serif"))
+
+#weekDay
+plotWeekd <- nowa_uczaca %>%
+  count(weekDay) %>%
+  ggplot() + geom_col(aes(x = weekDay, y = n, fill = weekDay), alpha = 0.8) +
+  geom_label(aes(x = weekDay, y = n, label = n)) +
+  scale_fill_manual(values = c("gray86","firebrick3", "darkseagreen4", "yellow2", "pink3",
+                               "mediumpurple4","orange3")) +
+  theme_minimal() +
+  ggtitle("Dzień dokonania transakcji") + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x=element_blank(),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=22, family="serif"))
+
+
+#mccname
+plotMccname <- nowa_uczaca %>%
+  count(mccname) %>%
+  ggplot() + geom_col(aes(x = mccname, y = n, fill = mccname), alpha = 0.7) +
+  geom_label(aes(x = mccname, y = n, label = n)) +
+  scale_fill_manual(values = c("deeppink3", "gray50", "blue3", "gray50", "gray50", "green4", "red2")) +
+  theme_minimal() +
+  ggtitle("Liczba transakcji w zależności od zmiennej Mccname") + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.title = element_text(size=8),
+        legend.text = element_text(size=6),
+        legend.position = "right",
+        legend.justification = c(0.8,0.8),
+        legend.background = element_rect(fill="gray90",
+                                         size=0.5, linetype="solid", 
+                                         colour ="gray10"),
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#issuer
+plotIssuer <- nowa_uczaca %>%
+  count(issuer) %>%
+  ggplot() + geom_col(aes(x = issuer, y = n, fill = issuer), alpha = 0.7) +
+  geom_label(aes(x = issuer, y = n, label = n)) +
+  scale_fill_manual(values = c("dodgerblue2", "chocolate2", "slateblue3")) +
+  theme_minimal() +
+  ggtitle("Liczba transakcji w zależności od zmiennej Issuer") + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#listtype
+plotListt <- nowa_uczaca %>%
+  count(listtype) %>%
+  ggplot() + geom_col(aes(x = listtype, y = n, fill = listtype), alpha = 0.7) +
+  geom_label(aes(x = listtype, y = n, label = n)) +
+  scale_fill_manual(values = c("seagreen3", "gold3", "indianred3")) +
+  theme_minimal() +
+  ggtitle("Listtype") + 
+  theme(axis.title.y = element_text(color="Grey23", size=16),
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+
+#Histogram dla zmiennej amount
+plotAmount <- ggplot(nowa_uczaca, aes(x = amount)) + geom_histogram(binwidth = 200, alpha = 0.7, fill = "darkorange3") + theme_minimal() +
+  ggtitle('Rozkład zmiennej amount') + 
+  theme(axis.title.y = element_text(color="Grey23", size=11),
+        axis.text.y = element_text(size=9),
+        axis.title.x = element_text(color="Grey23", size=11),
+        axis.text.x = element_text(size=9),
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#Histogram dla zmiennej amount + status
+plotAmStat <- ggplot(nowa_uczaca, aes(x = amount, fill=status)) + geom_histogram(binwidth = 200, alpha = 0.7) + facet_grid(~status) + theme_minimal() +
+  scale_fill_manual(values = c("tomato3","royalblue2")) + 
+  ggtitle('Rozkład zmiennej amount z podziałem na status transakcji') + 
+  theme(axis.title.y = element_text(color="Grey23", size=11),
+        axis.text.y = element_text(size=9),
+        axis.title.x = element_text(color="Grey23", size=11),
+        axis.text.x = element_text(size=9),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#Histogram dla zmiennej amount + type
+plotAmTyp <- ggplot(nowa_uczaca, aes(x = amount, fill=type)) + geom_histogram(binwidth = 200, alpha = 0.7) + facet_grid(~type) + theme_minimal() +
+  scale_fill_manual(values = c("deepskyblue2","darkorange2")) + 
+  ggtitle('Rozkład zmiennej amount z podziałem na typ karty') + 
+  theme(axis.title.y = element_text(color="Grey23", size=11),
+        axis.text.y = element_text(size=9),
+        axis.title.x = element_text(color="Grey23", size=11),
+        axis.text.x = element_text(size=9),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#Histogram dla zmiennej amount + listtype
+
+doHist <- nowa_uczaca[nowa_uczaca$listtype != "PUBLIC" & nowa_uczaca$issuer != "MAESTRO",]
+
+plotAmListt <- ggplot(doHist, aes(x = amount, fill=listtype)) + geom_histogram(binwidth = 200, alpha = 0.7) + facet_grid(~listtype) + theme_minimal() +
+  scale_fill_manual(values = c("seagreen3", "gold3")) + 
+  ggtitle('Rozkład zmiennej amount z podziałem sektor działania partnera') + 
+  theme(axis.title.y = element_text(color="Grey23", size=11),
+        axis.text.y = element_text(size=9),
+        axis.title.x = element_text(color="Grey23", size=11),
+        axis.text.x = element_text(size=9),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+#Histogram dla zmiennej amount + issuer
+plotAmIss <- ggplot(doHist, aes(x = amount, fill=issuer)) + geom_histogram(binwidth = 200, alpha = 0.7) + facet_grid(~issuer) + theme_minimal() +
+  scale_fill_manual(values = c("chocolate2", "slateblue3")) + 
+  ggtitle('Rozkład zmiennej amount z podziałem na wystawcę karty') + 
+  theme(axis.title.y = element_text(color="Grey23", size=11),
+        axis.text.y = element_text(size=9),
+        axis.title.x = element_text(color="Grey23", size=11),
+        axis.text.x = element_text(size=9),
+        legend.position = "none",
+        plot.title = element_text(color="gray10", size=19, family="serif"))
+
+```
+
+### Wykres typu *barplot* dla wybranych zmiennych
+
+```{r fig.width=8, fig.height=9}
+plotStat
+```
+
+
+```{r fig.width=8, fig.height=9}
+grid.arrange(plotType, plotExpy, plotWeekd)
+```
+
+
+```{r fig.width=9, fig.height=13}
+grid.arrange(plotMccname, plotIssuer, plotListt)
+```
+
+### Histogramy dla wybranych zmiennych
+
+```{r fig.height=6}
+plotAmount
+```
+
+
+```{r fig.width=8, fig.height=9}
+grid.arrange(plotAmStat, plotAmTyp)
+```
+
+
+```{r fig.width=8, fig.height=9}
+grid.arrange(plotAmListt, plotAmIss)
+```
+
+### Eksploracja danych - proba walidacyjna
+
+Analogiczne operacje jak na próbie testowej wykonano na próbie walidacyjnej.
+
+```{r}
+head(proba_walidacyjna)
+tail(proba_walidacyjna)
+str(proba_walidacyjna)
+summary(proba_walidacyjna)
+```
+
+### Transformacja danych
+
+Poniżej zostały przedstawione czynności mające na celu transformacje zmiennych za pomocą biblioteki "dplyr".
+
+```{r}
+proba_walidacyjna$description <- ifelse(proba_walidacyjna$description == "", "Brak opisu", proba_walidacyjna$description)
+proba_walidacyjna$description <- ifelse(is.na(proba_walidacyjna$description), "Brak opisu", proba_walidacyjna$description)
+
+proba_walidacyjna <- proba_walidacyjna %>%
+  select(id, createtime, amount, description, recurringaction, acquirerconnectionmethod, expirymonth, expiryyear, issuer, 
+         type, level, countrycode, listtype, mccname, status) %>%
+  filter(recurringaction == "AUTO") %>%
+  mutate(acquirerconnectionmethod = factor(acquirerconnectionmethod),
+         expirymonth = factor(expirymonth),
+         description = factor(description),
+         expiryyear = factor(expiryyear),
+         issuer = factor(issuer),
+         type = factor(type),
+         level = factor(level),
+         countrycode = factor(countrycode),
+         listtype = factor(listtype),
+         mccname = factor(mccname))
+
+proba_walidacyjna$recurringaction <- NULL
+
+proba_walidacyjna$weekDay <- weekdays(as.Date(proba_walidacyjna$createtime))
+proba_walidacyjna$weekDay <- as.factor(proba_walidacyjna$weekDay)
+proba_walidacyjna$status <- ifelse(proba_walidacyjna$status == "completed successfully", "success", "fail")
+proba_walidacyjna$status <- as.factor(proba_walidacyjna$status)
+
+proba_walidacyjna$weekDay <- factor(proba_walidacyjna$weekDay, levels= c("poniedziałek", "wtorek", 
+                                                              "środa", "czwartek", "piątek", "sobota", "niedziela"))
+```
+
+### Podsumowanie zmian
+
+Zmiany w próbie walidacyjnej oparte były w głównej mierze na wybraniu odpowiednich zmiennych, stworzeniu dodatkowej zmiennej - *weekDay* oraz zamianie czynników w zmiennej *status*.
+
+```{r}
+str(proba_walidacyjna)
+summary(proba_walidacyjna)
+```
+
+### Eksploracja danych - proba testowa
+
+```{r}
+head(proba_testowa)
+tail(proba_testowa)
+str(proba_testowa)
+summary(proba_testowa)
+```
+
+### Transformacja danych
+
+Poniżej zostały przedstawione czynności mające na celu transformacje zmiennych za pomocą biblioteki "dplyr".
+
+```{r}
+proba_testowa$description <- ifelse(proba_testowa$description == "", "Brak opisu", proba_testowa$description)
+proba_testowa$description <- ifelse(is.na(proba_testowa$description), "Brak opisu", proba_testowa$description)
+
+proba_testowa <- proba_testowa %>%
+  select(id, createtime, description, recurringaction, acquirerconnectionmethod, expirymonth, expiryyear, issuer, 
+         type, level, countrycode, listtype, mccname) %>%
+  filter(recurringaction == "AUTO") %>%
+  mutate(acquirerconnectionmethod = factor(acquirerconnectionmethod),
+         expirymonth = factor(expirymonth),
+         description = factor(description),
+         expiryyear = factor(expiryyear),
+         issuer = factor(issuer),
+         type = factor(type),
+         level = factor(level),
+         countrycode = factor(countrycode),
+         listtype = factor(listtype),
+         mccname = factor(mccname))
+
+proba_testowa$recurringaction <- NULL
+
+proba_testowa$weekDay <- weekdays(as.Date(proba_testowa$createtime))
+proba_testowa$weekDay <- as.factor(proba_testowa$weekDay)
+proba_testowa$weekDay <- factor(proba_testowa$weekDay, levels= c("poniedziałek", "wtorek", 
+                                                               "środa", "czwartek", "piątek", "sobota", "niedziela"))
+
+```
+
+### Podsumowanie zmian
+
+Zmiany polegały głównie na wybraniu odpowiednich zmiennych do próby testowej oraz na stworzeniu dodatkowej zmiennej - *weekDay*.
+
+```{r}
+str(proba_testowa)
+summary(proba_testowa)
+```
+
+### Ujednolicenie poziomów zmiennych typu "factor" w celu pozbycia się błędów przy korzystaniu z niektórych funkcji
+
+Ujednolicenie poziomów zmiennych typu "factor" było koniecznie, aby poprawnie zadziałały niektóre funkcje do budowy modeli nieparametrycznych. Bez takiego zabiegu pojawiały się błędy związane z różnicą tych czynników.
+
+```{r}
+proba_testowa$expiryyear <- factor(proba_testowa$expiryyear, levels = levels(nowa_uczaca$expiryyear))
+proba_testowa$description <- factor(proba_testowa$description, levels = levels(nowa_uczaca$description))
+proba_testowa$expirymonth  <- factor(proba_testowa$expirymonth , levels = levels(nowa_uczaca$expirymonth))
+proba_testowa$issuer <- factor(proba_testowa$issuer, levels = levels(nowa_uczaca$issuer))
+proba_testowa$level <- factor(proba_testowa$level, levels = levels(nowa_uczaca$level))
+proba_testowa$countrycode <- factor(proba_testowa$countrycode, levels = levels(nowa_uczaca$countrycode))
+proba_testowa$mccname <- factor(proba_testowa$mccname, levels = levels(nowa_uczaca$mccname))
+proba_testowa$weekDay <- factor(proba_testowa$weekDay, levels = levels(nowa_uczaca$weekDay))
+proba_testowa$listtype <- factor(proba_testowa$listtype, levels = levels(nowa_uczaca$listtype))
+proba_testowa$acquirerconnectionmethod <- factor(proba_testowa$acquirerconnectionmethod, levels = levels(nowa_uczaca$acquirerconnectionmethod))
+proba_testowa$type <- factor(proba_testowa$type, levels = levels(nowa_uczaca$type))
+
+proba_walidacyjna$expiryyear <- factor(proba_walidacyjna$expiryyear, levels = levels(nowa_uczaca$expiryyear))
+proba_walidacyjna$description <- factor(proba_walidacyjna$description, levels = levels(nowa_uczaca$description))
+proba_walidacyjna$expirymonth  <- factor(proba_walidacyjna$expirymonth , levels = levels(nowa_uczaca$expirymonth))
+proba_walidacyjna$issuer <- factor(proba_walidacyjna$issuer, levels = levels(nowa_uczaca$issuer))
+proba_walidacyjna$level <- factor(proba_walidacyjna$level, levels = levels(nowa_uczaca$level))
+proba_walidacyjna$countrycode <- factor(proba_walidacyjna$countrycode, levels = levels(nowa_uczaca$countrycode))
+proba_walidacyjna$mccname <- factor(proba_walidacyjna$mccname, levels = levels(nowa_uczaca$mccname))
+proba_walidacyjna$weekDay <- factor(proba_walidacyjna$weekDay, levels = levels(nowa_uczaca$weekDay))
+proba_walidacyjna$listtype <- factor(proba_walidacyjna$listtype, levels = levels(nowa_uczaca$listtype))
+proba_walidacyjna$acquirerconnectionmethod <- factor(proba_walidacyjna$acquirerconnectionmethod, levels = levels(nowa_uczaca$acquirerconnectionmethod))
+proba_walidacyjna$type <- factor(proba_walidacyjna$type, levels = levels(nowa_uczaca$type))
+
+nowa_uczaca <- na.omit(nowa_uczaca)
+proba_walidacyjna <- na.omit(proba_walidacyjna)
+proba_testowa <- na.omit(proba_testowa)
+
+summary(nowa_uczaca)
+summary(proba_walidacyjna)
+summary(proba_testowa)
+
+proba_testowa_final <- proba_testowa
+
+nowa_uczaca$amount <- NULL
+proba_walidacyjna$amount <- NULL
+```
+
+___
+
+## **ZADANIE 1. Budowa modelu w oparciu o zmienną jakościową "status"**
+
+### Funkcja do obliczania logarytmu wiarygodności
+
+Poniższa funkcja została została napisana, aby poprawnie policzyć logarytm wiarygodności uzyskany za pomocą oszacowanych modeli.
+
+```{r}
+loglikelihood <- function(y, py) {
+  pysmooth <- ifelse(py == 0, 1e-12,
+                     ifelse(py == 1, 1 - 1e-12, py))
+  
+  sum(y * log(pysmooth) + (1 - y) * log(1 - pysmooth))
+
+}
+```
+
+### Funkcja obliczająca i zwracająca znormalizowaną dewiancję, dokładność predykcyjną i wynik f1
+
+Kolejna funkcja ma za zadanie obliczyć miarę dokładności, precyzji oraz f1 dla zbudowanych modeli na podstawie predykcji w oparciu o prawdopodobieństwa.
+
+```{r}
+miaryDokladnosci <- function(pred, truth, name = "model") {
+  dev.norm <- -2 * loglikelihood(as.numeric(truth), pred) / length(pred)
+  ctable <- table(truth = truth,
+                  pred = (pred > 0.5))
+  accuracy <- sum(diag(ctable)) / sum(ctable)
+  precision <- ctable[2,2] / sum(ctable[2,])
+  recall <- ctable[2,2] / sum(ctable[2,])
+  f1 <- 2 * precision * recall / (precision + recall)
+  data.frame(model = name, accuracy = accuracy, f1 = f1, dev.norm)
+}
+```
+
+### Zbudowanie maksymalnego drzewa klasyfikacyjnego z parametrem cp = 0
+
+W pierwszym etapie badania zbudowano maksymalne drzewo klasyfikacyjne, którego stopień rozbudowania uniemożliwia interpretację.
+
+```{r fig.width=12, fig.height=8}
+statusTree <- rpart(formula = status ~ . - id - createtime, 
+                data=nowa_uczaca,
+                cp = 0, xval = 10)
+
+plot(statusTree)
+```
+
+### Obliczanie błędów na bazie sprawdzania krzyżowego
+
+W celu zredukowania wymiarowości drzewa, obliczono błędy na bazie sprawdzania krzyżowego i na tej podstawie określono optymalny numer drzewa. Jak widać na poniższych wykresach, wartości błędów "wypłaszczają się" już od około 60 podziału, choć już od wartości około 20, tempo spadku wartości błędu jest wyraźnie mniejsze.
+
+```{r fig.width=8}
+bledy <- printcp(statusTree)
+
+matplot(x = bledy[, "nsplit"],
+        y = bledy[, c("rel error", 
+                      "xerror")],  
+        type = "l",
+        xlab = "wielkość drzewa",
+        ylab = "błąd")
+legend(x = "topright", legend = c("błąd na próbie uczącej", 
+                                  "błąd w sprawdzaniu krzyżowym"),
+       col = c("black", "red"),
+       lty = 1:2)
+
+statusTree$cptable
+plotcp(statusTree)
+
+grid()
+```
+
+### Ustalanie optymalnego numeru drzewa
+
+Przycinanie drzewa (wybór najmniejszego drzewa, którego błąd w sprawdzaniu krzyżowym jest większy od minimalnego błędu nie więcej niż o jedno odchylenie standardowe) wskazało na gałąź nr 22.
+  
+```{r}
+bledy <- statusTree$cptable
+tmp1 <- which.min(bledy[, "xerror"])  
+tmp2 <- sum(bledy[tmp1, c("xerror", "xstd")]) 
+optymalny <- which(bledy[, "xerror"] < tmp2)[1] 
+
+statusTree.p <- prune(statusTree, cp = bledy[optymalny, "CP"])
+statusTree.p$cptable
+```
+
+### Wykres przyciętego drzewa
+
+Przycięcie drzewa zredukowało jego wymiarowość, choć wciąż jest to drzewo stosunkowo rozbudowane z 62 podziałami.
+
+```{r fig.width=10, fig.height=8}
+plot(statusTree.p)
+```
+
+### Odczytanie ważności zmiennych
+
+Najistotniejszymi zmiennymi okazały się:
+
+* **expirymonth**,
+* **expirymonth**,
+* **level**,
+* **description**,
+* **mccname**,
+* **countrycode**,
+* **weekDay**,
+* **issuer**,
+* **acquirerconnectionmethod**,
+* **type**
+* oraz **listtype**
+
+i w oparciu o te zmienne zbudowany został kolejny model **new.statusTree**.
+
+```{r fig.width=8}
+cbind(statusTree.p$variable.importance)
+dotchart(rev(statusTree$variable.importance))
+```
+
+### Zbudowanie drzewa w oparciu tylko o najważniejsze zmienne
+
+```{r}
+impr_uczaca <- nowa_uczaca[,c(13,9,3,5,12,10,4)]
+new.statusTree <- rpart(formula = status ~ ., 
+                    data=impr_uczaca,
+                    cp = 0, xval = 10)
+```
+
+### Wykres nowego drzewa
+
+Nowe drzewo, stworzone tylko czy użyciu ważnych zmiennych nadal jest trudne w interpretacji, lecz zmniejszyło się w stosunku do drzewa z większą ilością zmiennych.
+
+```{r fig.width=10}
+plot(new.statusTree)
+```
+
+### Obliczanie błędów na bazie sprawdzania krzyżowego
+
+Analogicznie jak w przypadku pierwszego drzewa, obliczono błędy na bazie sprawdzania krzyżowego i na tej podstawie powstało kolejne zredukowane drzewo.
+
+```{r fig.width=8}
+bledy2 <- printcp(new.statusTree) # sekwencja drzew do optymalnego przycinania
+
+matplot(x = bledy[, "nsplit"],
+        y = bledy[, c("rel error",  # błąd na próbie uczącej (w stosunku do błędu dla korzenia)
+                      "xerror")],  # błąd w sprawdzaniu krzyżowym
+        type = "l",
+        xlab = "wielkość drzewa",
+        ylab = "błąd")
+legend(x = "topright", legend = c("błąd na próbie uczącej", 
+                                  "błąd w sprawdzaniu krzyżowym"),
+       col = c("black", "red"),
+       lty = 1:2)
+
+new.statusTree$cptable
+plotcp(new.statusTree)
+```
+
+### Ustalanie optymalnego numeru drzewa z ograniczoną liczbą zmiennych
+
+Przycinanie drzewa wskazało na drzewo nr. 21 z 49 punktami podziału.
+
+```{r}
+bledy2 <- new.statusTree$cptable
+tmp12 <- which.min(bledy2[, "xerror"])
+tmp22 <- sum(bledy2[tmp12, c("xerror", "xstd")]) 
+optymalny2 <- which(bledy2[, "xerror"] < tmp22)[1] 
+
+new.statusTree.prune <- prune(new.statusTree, cp = bledy2[optymalny2, "CP"])
+new.statusTree.prune$cptable
+```
+
+### Wykres drzewa dla optymalnego parametru cp z ograniczoną liczbą zmiennych
+
+```{r fig.width=10}
+plot(new.statusTree.prune)
+```
+
+### Wykonanie odpowiednich predykcji
+
+Modele nie różnią się znacząco pomiędzy sobą jeśli chodzi o miary dokładności, choć najlepsze okazało się "drzewo na podstawie próbie uczącej - wszystkie zmienne", dla którego wartości accuracy oraz F-miary są najwyższe, natomiast odchylenie standardowe jest najniższe. Powyższe zestawienie zostało stworzone za pomocą prawdopodobieństw. W dalszej części projektu zostanie zaprezentowane porównanie wyników miar uzyskanych za pomocą predykcji z argumentem **type = class**.
+
+```{r fig.width=17}
+pred.prune.stat.tree.train <- predict(object = new.statusTree.prune,
+                             newdata = nowa_uczaca)[,2]
+
+pred.prune.stat.tree.walid <- predict(object = new.statusTree.prune,
+                     newdata = proba_walidacyjna)[,2]
+
+trainOcen <- miaryDokladnosci(pred.prune.stat.tree.train,
+                              nowa_uczaca$status == "success",
+                              name = "drzewo na podstawie próbie uczącej - ważne zmienne")
+
+walidOcen <- miaryDokladnosci(pred.prune.stat.tree.walid,
+                              proba_walidacyjna$status == "success",
+                              name = "drzewo na podstawie próby walidacyjnej - ważne zmienne")
+
+predykcjaStatTreeTrain.all <- predict(object = statusTree.p,
+                                  newdata = nowa_uczaca)[,2]
+
+predykcjaStatTreeWalid.all <- predict(object = statusTree.p,
+                                  newdata = proba_walidacyjna)[,2]
+
+trainOcen.all <- miaryDokladnosci(predykcjaStatTreeTrain.all,
+                              nowa_uczaca$status == "success",
+                              name = "drzewo na podstawie próbie uczącej - wszystkie zmienne")
+
+walidOcen.all <- miaryDokladnosci(predykcjaStatTreeWalid.all,
+                              proba_walidacyjna$status == "success",
+                              name = "drzewo na podstawie próby walidacyjnej - wszystkie zmienne")
+
+perftable <- rbind(trainOcen.all, walidOcen.all, trainOcen, walidOcen)
+pandoc.table(perftable, justify = perf_justify)
+```
+
+### Błędy klasyfikacji na próbie walidacyjnej
+
+Błąd klasyfikacji dla modelu ze wszystkimi zmiennymi okazał się nieco niższy niż dla modelu z wybranymi zmiennymi.
+
+```{r}
+err.imp.var.class <- sum(predict(object = new.statusTree.prune,
+            newdata = proba_walidacyjna,
+            type = "class") != proba_walidacyjna$status) / nrow(proba_walidacyjna)
+
+err.all.var.class <- sum(predict(object = statusTree.p,
+            newdata = proba_walidacyjna,
+            type = "class") != proba_walidacyjna$status) / nrow(proba_walidacyjna)
+
+data.frame("Błąd klasyfikacji dla wszystkich zmiennych" = err.all.var.class,
+           "Błąd klasyfikacji dla wybranych zmiennych" = err.imp.var.class)
+```
+
+### Błędy resubstytucji na próbie uczącej
+
+Podobnie jest w przypadku błędu resubstytucji, który w modelu uwzględniającym wszystkie zmienne okazał się mniejszy niż w modelu dla wybranych zmiennych.
+
+```{r}
+err.res.imp.var <- mean(predict(object = new.statusTree.prune,
+                     newdata = impr_uczaca, type = 'class') != impr_uczaca$status) 
+
+err.res.all.var <- mean(predict(object = statusTree.p,
+             newdata = nowa_uczaca, type = 'class') != nowa_uczaca$status) 
+
+data.frame("Błąd resubstytucji dla wszystkich zmiennych" = err.res.all.var,
+           "Błąd resubstytucji dla wybranych zmiennych" = err.res.imp.var)
+```
+
+### Macierze błędnych klasyfikacji
+
+#### Próba walidacyjna - wybrane zmienne
+
+```{r}
+tabKlasWalidImp <- table(rzeczywiste = proba_walidacyjna$status, 
+               prognozowane = predict(object = new.statusTree.prune,
+                                      newdata = proba_walidacyjna,
+                                      type = "class"))
+tabKlasWalidImp
+```
+
+#### Próba ucząca - wybrane zmienne
+
+```{r}
+tabKlasTrainImp <- table(rzeczywiste = nowa_uczaca$status, 
+                      prognozowane = predict(object = new.statusTree.prune,
+                                             newdata = nowa_uczaca,
+                                             type = "class"))
+tabKlasTrainImp
+```
+
+#### Próba walidacyjna - wszystkie zmienne
+
+```{r}
+tabKlasWalidAll <- table(rzeczywiste = proba_walidacyjna$status, 
+                      prognozowane = predict(object = statusTree.p,
+                                             newdata = proba_walidacyjna,
+                                             type = "class"))
+tabKlasWalidAll
+```
+
+#### Próba ucząca - wszystkie
+
+```{r}
+tabKlasTrainAll <- table(rzeczywiste = nowa_uczaca$status, 
+                      prognozowane = predict(object = statusTree.p,
+                                             newdata = nowa_uczaca,
+                                             type = "class"))
+tabKlasTrainAll
+```
+
+### Budowa modelu metodą BAGGING
+
+### Wykres pojedynczego drzewa stworzonego metodą bagging
+
+Poniżej przedstawiono przykładowe drzewo klasyfikacyjne stworzone z wykorzystaniem metody bagging.
+
+W pierwszym podziale zbioru 52% jednostek zostało zakwalifikowanych jako jednostki z 0.72 prawdopodobieństwem sukcesu, pozostałe 48% skategoryzowane były jako jednostki z 0.89 prawdopodobieństwem sukcesu. W kolejnej iteracji 48% jednostek zostało zaklasyfikowanych jako jednostki z 0.75 prawdopodobieństwa sukcesu, natomiast 4% jednostek zostało zakwalifikowanych jako jednostki z 0.37 prawdopodobieństwem na nieudaną transakcję itd..
+
+```{r fig.height=8, fig.width=8}
+bagg.status.tree.train <- bagging(status ~ . - id - createtime, data = nowa_uczaca, mfinal = 30, maxdepth=5)
+bagg.status.tree.walid <- bagging(status ~ . - id - createtime, data = proba_walidacyjna, mfinal = 30, maxdepth=5)
+
+rpart.plot(bagg.status.tree.train$trees[[2]], roundint = FALSE)
+```
+
+### Wykres błędów na zbiorze walidacyjnym oraz uczącym
+
+Na zbiorze walidacyjnym błąd jest nieco niższy, choć wraz ze wzrostem iteracji błąd "się wypłaszcza".
+
+```{r fig.width=9}
+plot.errorevol(
+  errorevol(object = bagg.status.tree.train, newdata = proba_walidacyjna),
+  errorevol(object = bagg.status.tree.walid, newdata = nowa_uczaca))
+
+grid()
+```
+
+### Wykres ważności zmiennych
+
+W modelu oszacowanym za pomocą metody bagging najistotniejszymi zmiennymi okazały się:
+
+* **acquirerconnectionmethod**,
+* **countrycode**,
+* **description**,
+* **expirymonth**,
+* **issuer**,
+* **level**,
+* **listtype**,
+* **mccname**,
+* **type**,
+* **weekDay**.
+
+```{r fig.width=8}
+dotchart(rev(bagg.status.tree.train$importance))
+```
+
+### Predykcja za pomocą metody bagging, macierz błędnych klasyfikacji oraz błąd klasyfikacji 
+
+Poniżej przedstawiono macierz błędnych klasyfikacji oraz błąd klasyfikacji dla modelu bagging z parametrem mfinal = 30
+
+```{r}
+bagg.status.tree.pred <- predict.bagging(bagg.status.tree.train, newdata = proba_walidacyjna)
+bagg.status.tree.pred$confusion
+bagg.status.tree.pred$confusion <- as.table(bagg.status.tree.pred$confusion)
+err.bagg.class <- bagg.status.tree.pred$error
+err.bagg.class
+```
+
+### Zbudowanie modelu metodą bagging na podstawie ustalonej optymalnej liczby modeli bazowych
+
+```{r}
+mfinal.min <- which.min(errorevol(object = bagg.status.tree.walid, newdata = proba_walidacyjna)$error)
+bagg.status.tree.train <- bagging(status ~ . - id - createtime, data = nowa_uczaca, mfinal = mfinal.min, maxdepth=5)
+```
+
+### Macierz błędnych klasyfikacji oraz błąd klasyfikacji dla nowego modelu
+
+Zaprezentowane poniżej wyniki dotyczą modelu bagging stworzonego na podstawie ustalonej optymalnej liczby modeli bazowych.
+
+```{r}
+min.bagg.status.tree.pred <- predict.bagging(bagg.status.tree.train, newdata = proba_walidacyjna)
+min.bagg.status.tree.pred$confusion
+min.bagg.status.tree.pred$confusion <- as.table(min.bagg.status.tree.pred$confusion)
+min.bagg.status.tree.pred$error
+```
+
+### Błąd klasyfikacji i macierz pomyłek dla lepszego modelu bagging
+
+W celu wybrania lepszego modelu zbudowanego za pomocą metody bagging napisano funkcję, która porównuje obydwa błędy i następnie zapisuje do ostatecznych wyników ten mniejszy. Funkcja powiązana jest z drugą funkcją, która wybiera macierz błędnych klasyfikacji dla modelu z mniejszym błędem. Zaprezentowany został również wynik działania tych funkcji.
+
+```{r}
+czyMniejszy <- function(x,y){
+  if (x < y){
+    final.bagg.error <- x}
+    
+  else {
+    final.bagg.error <- y }
+  
+  final.bagg.error
+}
+
+final.bagg.error.score <- czyMniejszy(min.bagg.status.tree.pred$error, err.bagg.class)
+
+
+czyMniejszy2 <- function(x,y){
+  if (min.bagg.status.tree.pred$error < err.bagg.class){
+    final.bagg.conf <- x}
+  
+  else {
+    final.bagg.conf <- y }
+  
+  final.bagg.conf <- as.table(final.bagg.conf)
+  final.bagg.conf
+}
+
+final.bagg.conf.score <- czyMniejszy2(min.bagg.status.tree.pred$confusion, bagg.status.tree.pred$confusion)
+
+final.bagg.error.score
+final.bagg.conf.score
+```
+
+### Zbudowanie modelu metodą boosting wraz z wykresem błędu na zbiorze uczącym i walidacyjnym
+
+W kolejnym oszacowanym modelu, tym razem zbudowanym z wykorzystaniem metody boosting, udało się znacząco zmniejszyć różnice pomiędzy błędami na zbiorze uczącym oraz walidacyjnym.
+
+```{r fig.width=10}
+boost.status.tree.train <- boosting(status ~ . - id - createtime, data = nowa_uczaca, mfinal = 20)
+boost.status.tree.walid <- boosting(status ~ . - id - createtime, data = proba_walidacyjna, mfinal = 20)
+
+plot.errorevol(
+  errorevol(object = boost.status.tree.train, newdata = nowa_uczaca),
+  errorevol(object = boost.status.tree.walid, newdata = proba_walidacyjna))
+
+grid()
+
+```
+
+### Wykres ważności zmiennych
+
+W nowym modelu oszacowanym za pomocą metody boosting najistotniejszymi zmiennymi okazały się:
+
+* **acquirerconnectionmethod**,
+* **countrycode**,
+* **description**,
+* **expirymonth**,
+* **issuer**,
+* **level**,
+* **listtype**,
+* **mccname**,
+* **type**,
+* **weekDay**
+
+czyli dokładnie te same zmienne w tej samej kolejności co w przypadku wcześniej oszacowanego modelu z wykorzystaniem metody bagging.
+
+```{r fig.width=8}
+dotchart(rev(boost.status.tree.train$importance))
+```
+
+### Macierz błędnych klasyfikacji i błąd klasyfikacji dla modelu Boosting
+
+Poniżej przedstawiono macierz błędnych klasyfikacji oraz błąd klasyfikacji na poziomie 0.1694, zatem niewiele większy niż w przypadku modelu oszacowanego metodą bagging.
+
+```{r}
+boost.status.tree.pred <- predict.boosting(boost.status.tree.train, newdata = proba_walidacyjna)
+boost.status.tree.pred$confusion
+boost.status.tree.pred$confusion <- as.table(boost.status.tree.pred$confusion)
+err.boost.class <- boost.status.tree.pred$error
+err.boost.class
+```
+
+### Budowa modelu metodą RANDOM FOREST
+
+Kolejnym oszacowanym modelem jest model zbudowany za pomocą metody Random Forest. Oszacowany model złożony jest ze 100 drzew, natomiast sprawdzenie błędu OOB następowało co 10 drzew - przy setnym drzewie ten błąd oscyluje wokół 14%.
+
+```{r}
+status.fr <- randomForest(status ~. - id - createtime, data=nowa_uczaca, do.trace = 10, ntree=100, keep.forest = TRUE)
+print(status.fr)
+```
+
+#### Predykcje metodą R.F.
+
+W kolejnym etapie obliczono predykcje za pomocą wcześniej zbudowanego modelu z wykorzystaniem metody Random Forest.
+
+```{r include=FALSE}
+predykcje.rf.walid <- predict(status.fr, newdata = proba_walidacyjna, block.size = 1)
+predykcje.rf.walid
+```
+
+### Porównanie zbioru uczącego i testowego
+
+Oba modele znacznie trafniej klasyfikują transakcje udane, co wynika z wysokiej dysproporcji w liczebnościach obu wariantów zmiennej **status**. Najprawdopodobniej pożądanym wynikiem byłby wynik odwrotny, bowiem istotniejsze wydaje się być sklasyfikowanie transakcji nieudanych i rozwiązanie potencjalnych problemów.
+
+```{r}
+x.test <- proba_walidacyjna[,c(-1,-2,-13)]
+y.test <- proba_walidacyjna$status
+status.fr2 <- randomForest(status ~. - id - createtime, data=nowa_uczaca, xtest= x.test, 
+                           ytest=y.test, ntree = 100)
+print(status.fr2)
+```
+
+### Wykres ważności zmiennych
+
+W nowym modelu oszacowanym za pomocą metody Random Forest najistotniejszymi zmiennymi okazały się:
+
+* **expirymonth**,
+* **level**,
+* **description**,
+* **expiryyear**,
+* **weekDay**,
+* **countrycode**,
+* **mccname**,
+* **acquirerconnectionmethod**,
+* **type**,
+* **issuer**,
+* **listtype**,
+
+czyli w większości te same zmienne, co w poprzednich modelach (z wyjątkiem zmiennej **expiryyear**), jednak w innej kolejności (uporządkowane od najważniejszych).
+
+```{r fig.width=8}
+varImpPlot(status.fr2,
+           sort = T,
+           main = "Ważność zmiennych dla modelu Random Forest")
+```
+
+### Wykres prezentujący zmianę błędu klasyfikacji na zbiorze walidacyjnym i uczących w zależności od liczby drzew
+
+Jak przedstawiono poniżej, błąd na zbiorze testowym drastycznie spada do około 20 drzewa, następnie tempo spadku zmniejsza się.
+
+```{r fig.height=6, fig.width=8}
+bl.oob <- status.fr2$err.rate[,1]
+bl.test <- status.fr2$test$err.rate[,1]
+#wykres
+plot(1:100, ylim=c(min(bl.test, bl.oob), max(bl.test, bl.oob)),
+     xlab="Liczba drzew", ylab="Błąd klasyfikacji", type='n')
+points(1:100, bl.oob, col="orange", pch=18)
+points(1:100, bl.test, col="blue", pch=16)
+lines(1:100, bl.oob, col="orange")
+lines(1:100, bl.test, col="blue")
+leg <- c("zbiór testowy", "OOB")
+legend('topright', legend=leg, col=c("blue","orange"), lty=1, pch=20)
+```
+
+### Macierz błędnym klasyfikacji i błąd klasyfikacji dla zbioru uczącego
+
+W porównaniu z wcześniej zbudowanymi modelami, w przypadku modelu oszacowanego metodą Random Forest błąd klasyfikacji znacząco się zmniejszył zarówno dla próby uczącej jak i walidacyjnej.
+
+```{r}
+status.fr2$confusion <- as.table(status.fr2$confusion)
+err.rf.status.train <- tail(status.fr2$err.rate,1)[1]
+status.fr2$confusion
+err.rf.status.train
+```
+
+### Macierz błędnym klasyfikacji i błąd klasyfikacji dla zbioru walidacyjnego
+
+```{r}
+status.tf.pred.table <- as.table(confusionMatrix(predykcje.rf.walid, proba_walidacyjna$status)$table)
+err.rf.status.test <- (status.tf.pred.table[1,2] + status.tf.pred.table[2,1]) / nrow(proba_walidacyjna)
+status.tf.pred.table
+err.rf.status.test
+```
+
+___
+
+## **Podsumowanie wyników dla zadania 1.**
+
+### Zestawienie błędów klasyfikacji dla badanych modeli
+
+Najmniejszy błąd klasyfikacyjny przeważnie wychodził dla modelu **Random Forest** dla danych walidacyjnych. Niski był również dla modelu **Random Forest** dla danych uczących oraz dla **drzewa klasyfikacyjnego ze wszystkimi zmiennymi objaśniającymi**. 
+
+```{r fig.width=8}
+bledy.podsumowanie <- cbind(c("drzewo klasyfikacyjne ze wszystkimi zmiennymi" = err.all.var.class,
+        "drzewo klasyfikacyjne tylko z najważniejszymi zmiennymi" = err.imp.var.class,
+        "bagging" = final.bagg.error.score,
+        "boosting" = err.boost.class,
+        "random forest OOB" = err.rf.status.train,
+        "random forest test" = err.rf.status.test))
+
+
+bledy.podsumowanie = data.frame(
+  col1 = c("drzewo klasyfikacyjne ze wszystkimi zmiennymi", "drzewo klasyfikacyjne tylko z najważniejszymi zmiennymi", 
+           "bagging", "boosting","random forest train", 'random forest valid'),
+  col2 = c(err.all.var.class, err.imp.var.class, final.bagg.error.score,  err.boost.class, err.rf.status.train, err.rf.status.test))
+
+colnames(bledy.podsumowanie) <- c("Model", "Wartość błędu klasyfikacyjnego")
+bledy.podsumowanie %>%
+  kbl(caption = "Wartość błędów klasyfikacyjnych dla poszczególnych modeli") %>%
+  kable_paper("hover", full_width = F, position = "left")
+```
+
+### Zestawienie najważniejszych miar dla zbudowanych modeli
+
+Poniższe zestawienie prezentuje najważniejsze miary obliczone dla modeli klasyfikacyjnych. Zostały wykorzystane takie miary jak: precyzja, czułość, swoistość (specyficzność) oraz miara F. Największe miary precyzji w większości przypadków były dla modeli **Random Forest** i **Bagging**. Najważniejsza miara, miara F największa okazała się w większości przypadków dla modelu **Random Forest** stworzonego na próbie walidacyjnej.
+
+```{r}
+podsumowanieMiar <- function(miary) {
+  TP <- miary["success","success"]
+  TN <- miary["fail", "fail"]
+  FP <- miary["fail", "success"]
+  FN <- miary["success", "fail"]
+  
+  c(precyzja = TP/(TP + FP),
+    czułość = TP/(TP + FN),
+    specyficzność = TN/(TN + FP),
+    F.miara = 2*TP / (2*TP + FP + FN))
+}
+
+miary.koncowe <- cbind(
+"Drzewo klasyfikacyjne dla zbioru uczącego i wszystkich zmiennych" = podsumowanieMiar(tabKlasTrainImp),
+"Drzewo klasyfikacyjne dla zbioru walidacyjnego i wszystkich zmiennych" = podsumowanieMiar(tabKlasWalidImp),
+"Drzewo klasyfikacyjne dla zbioru uczącego i wybranych zmiennych" = podsumowanieMiar(tabKlasTrainAll),
+"Drzewo klasyfikacyjne dla zbioru walidacyjnego i wszystkich zmiennych" = podsumowanieMiar(tabKlasWalidAll),
+"Model boosting" = podsumowanieMiar(boost.status.tree.pred$confusion),
+"Model bagging" = podsumowanieMiar(final.bagg.conf.score),
+"Model random forest dla próby uczacej" = podsumowanieMiar(status.fr2$confusion),
+"Model random forest dla próby walidacyjnej" = podsumowanieMiar(status.tf.pred.table))
+
+vec.prec <- c(podsumowanieMiar(tabKlasTrainImp)[1], podsumowanieMiar(tabKlasWalidImp)[1], podsumowanieMiar(tabKlasTrainAll)[1],
+              podsumowanieMiar(tabKlasWalidAll)[1], podsumowanieMiar(boost.status.tree.pred$confusion)[1], podsumowanieMiar(final.bagg.conf.score)[1],
+              podsumowanieMiar(status.fr2$confusion)[1], podsumowanieMiar(status.tf.pred.table)[1])
+vec.czul <- c(podsumowanieMiar(tabKlasTrainImp)[2], podsumowanieMiar(tabKlasWalidImp)[2], podsumowanieMiar(tabKlasTrainAll)[2],
+              podsumowanieMiar(tabKlasWalidAll)[2], podsumowanieMiar(boost.status.tree.pred$confusion)[2], podsumowanieMiar(final.bagg.conf.score)[2],
+              podsumowanieMiar(status.fr2$confusion)[2], podsumowanieMiar(status.tf.pred.table)[2])
+vec.spec <- c(podsumowanieMiar(tabKlasTrainImp)[3], podsumowanieMiar(tabKlasWalidImp)[3], podsumowanieMiar(tabKlasTrainAll)[3],
+              podsumowanieMiar(tabKlasWalidAll)[3], podsumowanieMiar(boost.status.tree.pred$confusion)[3], podsumowanieMiar(final.bagg.conf.score)[3],
+              podsumowanieMiar(status.fr2$confusion)[3], podsumowanieMiar(status.tf.pred.table)[3])
+vec.f <- c(podsumowanieMiar(tabKlasTrainImp)[4], podsumowanieMiar(tabKlasWalidImp)[4], podsumowanieMiar(tabKlasTrainAll)[4],
+           podsumowanieMiar(tabKlasWalidAll)[4], podsumowanieMiar(boost.status.tree.pred$confusion)[4], podsumowanieMiar(final.bagg.conf.score)[4],
+           podsumowanieMiar(status.fr2$confusion)[4], podsumowanieMiar(status.tf.pred.table)[4])
+
+
+podsumowanie.final <- data.frame("Precyzja" = vec.prec,
+                                 "Czułość" = vec.czul,
+                                 "Specyficzność" = vec.spec,
+                                 "Miara F" = vec.f)
+
+
+rownames(podsumowanie.final) <- c("Drzewo klasyfikacyjne dla zbioru uczącego i wszystkich zmiennych",
+                                    "Drzewo klasyfikacyjne dla zbioru walidacyjnego i wszystkich zmiennych",
+                                    "Drzewo klasyfikacyjne dla zbioru uczącego i wybranych zmiennych",
+                                    "Drzewo klasyfikacyjne dla zbioru walidacyjnego i wybranych zmiennych",
+                                    "Model boosting",
+                                    "Model bagging",
+                                    "Model random forest dla próby uczacej",
+                                    "Model random forest dla próby walidacyjnej")
+
+
+podsumowanie.final %>%
+  kbl(caption = "Wartość miar dla poszczególnych modeli") %>%
+  kable_paper("hover", full_width = F, position = "left")
+```
+
+### Zapisanie wartości zmiennej "status" do próby testowej na podstawie modelu random forest
+
+W ostatnim etapie dokonano predykcji zmiennej **status** dla próby testowej.
+
+```{r}
+predykcje.rf.test <- predict(status.fr, newdata = proba_testowa_final, block.size = 1)
+proba_testowa_final$status <- predykcje.rf.test
+table(proba_testowa_final$status)
+```
+
+___
+
+## **ZADANIE 2. Budowa modelu w oparciu o zmienną ilościową "amount"**
+
+### Czynności mające na celu przygotowanie próby uczącej i testowej do zbudowania modelu.
+
+Ze względu na wcześniejsze liczne operacje na danych, zbiór źródłowy został wgrany ponownie. Dane zostały również ponownie przetransformowane - analogicznie jak wcześniej z wyjątkiem zmiennej **status**.
+
+```{r}
+load("dane_zaliczenie.RData")
+
+proba_uczaca$description <- ifelse(proba_uczaca$description == "", "Brak opisu", proba_uczaca$description)
+proba_uczaca$description <- ifelse(is.na(proba_uczaca$description), "Brak opisu", proba_uczaca$description)
+
+nowa_uczaca <- proba_uczaca %>%
+  select(id, createtime, amount, description, recurringaction, acquirerconnectionmethod, expirymonth, expiryyear, issuer, 
+         type, level, countrycode, listtype, mccname) %>%
+  filter(recurringaction == "AUTO") %>%
+  mutate(acquirerconnectionmethod = factor(acquirerconnectionmethod),
+         expirymonth = factor(expirymonth),
+         description = factor(description),
+         expiryyear = factor(expiryyear),
+         issuer = factor(issuer),
+         type = factor(type),
+         level = factor(level),
+         countrycode = factor(countrycode),
+         listtype = factor(listtype),
+         mccname = factor(mccname))
+
+nowa_uczaca$recurringaction <- NULL
+
+nowa_uczaca$weekDay <- weekdays(as.Date(nowa_uczaca$createtime))
+nowa_uczaca$weekDay <- as.factor(nowa_uczaca$weekDay)
+
+nowa_uczaca$weekDay <- factor(nowa_uczaca$weekDay, levels= c("poniedziałek", "wtorek", 
+                                                             "środa", "czwartek", "piątek", "sobota", "niedziela"))
+
+
+```
+
+### Podsumowanie próby uczącej
+
+Zbiór danych jest taki sam jak wcześniej z wyłączeniem zmiennej **status**.
+
+```{r}
+str(nowa_uczaca)
+summary(nowa_uczaca)
+```
+
+### Podsumowanie próby testowej
+
+Analogicznie jest w przypadku próby testowej.
+
+```{r}
+str(proba_testowa_final)
+summary(proba_testowa_final)
+```
+
+### Zbudowanie modelu drzewa regresyjnego dla zmiennej 'amount'
+
+Dla zmiennej zależnej ilościowej **amount** oszacowano model, którego wykres widoczny jest poniżej.
+
+```{r fig.height=7, fig.width=9}
+drzewo.reg <- rpart(amount ~. -id - createtime, data = nowa_uczaca)
+prp(drzewo.reg)
+```
+
+### Wykresy przedstawiające zmianę wartości R2 i błędu krzyżowego w zależności od podziału drzewa
+
+Wraz ze wzrostem liczby punktów podziału, wartość R-kwadrat wzrasta, zaś wartość błędu krzyżowego maleje.
+
+```{r}
+rsq.rpart(drzewo.reg)
+grid()
+```
+
+### Sumy kwadratów reszt dla poszczególnych warunków
+
+Jak widać poniżej, wartości sumy kwadratów reszt są stosunkowo wysokie, zatem w grupach występuje duża zmienność.
+
+```{r}
+y <- nowa_uczaca$amount
+sum((y-mean(y))^2)
+ss <- function (x) sum((x-mean(x))^2)
+ss(y)
+
+ss(y[nowa_uczaca$listtype %in% c("MWF","ECOMMERCE")])
+ss(y[!(nowa_uczaca$listtype %in% c("MWF","ECOMMERCE"))])
+```
+
+### Miary ważności zmiennych
+
+W oszacowanym modelu najistotniejszymi zmiennymi okazały się:
+
+* **listtype**,
+* **expiryyear**,
+* **level**,
+* **mccname**,
+* **description**,
+* **expirymonth**,
+* **type**,
+* **acquirerconnectionmethod**,
+* **weekDay**,
+* **countrycode**,
+* **issuer**.
+
+```{r}
+drzewo.reg$variable.importance
+```
+
+### Stworzenia drzewa z parametrem cp = 0.
+
+Oszacowane zostało maksymalne drzewo z 1804 punktami podziału.
+
+```{r fig.width=9, fig.height=8}
+drzewo.reg.big <- rpart(amount ~.-id-createtime, data = nowa_uczaca, control = rpart.control(cp=0))
+plot(drzewo.reg.big)
+
+tail(drzewo.reg.big$cptable,15)
+przycinanie <- function(drzewo.reg) {
+  bledy <- drzewo.reg$cptable
+  tmp1 <- which.min(bledy[, "xerror"])  
+  tmp2 <- sum(bledy[tmp1, c("xerror", "xstd")]) 
+  optymalny <- which(bledy[, "xerror"] < tmp2)[1] 
+  
+  prune(drzewo.reg, cp = bledy[optymalny, "CP"]) 
+}
+```
+
+### Przycięcie drzewa regresyjnego
+
+W kolejnym etapie drzewo zostało przycięte, ograniczając liczbę punktów podziału do 53.  
+
+```{r fig.width=9, fig.height=8}
+drzewo_przyciete.reg <- przycinanie(drzewo.reg.big)
+drzewo_przyciete.reg$cptable
+plot(drzewo_przyciete.reg)
+rsq.rpart(drzewo_przyciete.reg)
+```
+
+### Wybrane miary dla drzewa przyciętego
+
+Sumy kwadratów reszt, współczynnik indeterminacji, R2 oraz RMSE dla drzewa przyciętego
+
+```{r}
+sum((y - predict(drzewo_przyciete.reg))^2)
+ss(y)
+sum((y - predict(drzewo_przyciete.reg))^2)/ss(y) 
+1 - sum((y - predict(drzewo_przyciete.reg))^2)/ss(y)
+
+drzewo.reg.pred <- predict(drzewo.reg, nowa_uczaca)
+RMSE.reg.drzewo.first <- RMSE(pred = drzewo.reg.pred, obs = nowa_uczaca$amount)
+RMSE.reg.drzewo.first
+```
+
+### Wizualizacja zmiennej *amount*
+
+Obserwacje, dla których wartość zmiennej **amount** przekroczyła wartość 500 zostały zaklasyfikowane jako obserwacje nietypowe i wykluczone ze zbioru. Wobec czego **338** obserwacji zostało zakwalifikowanych jako "outliers".
+
+```{r}
+summary(nowa_uczaca$amount)
+hist(nowa_uczaca$amount)
+count(nowa_uczaca[nowa_uczaca$amount > 500,])
+```
+
+### Odrzucenie jednostek odbiegających - "outliers"
+
+Poniżej przedstawiono histogram dla zbioru, z którego wykluczono obserwacje wyżej zaklasyfikowane jako odstające.
+
+```{r}
+nowa_regresja <- nowa_uczaca[nowa_uczaca$amount < 500,]
+summary(nowa_regresja$amount)
+hist(nowa_regresja$amount)
+```
+
+### Zbudowanie drzewa bez jednostek odbiegających
+
+Ponownie oszacowano model - tym razem bez jednostek odbiegających, dzięki czemu zredukowano liczbę punktów podziału do 10.
+
+```{r fig.width=8}
+new.drzewo.reg <- rpart(amount ~. -id - createtime, data = nowa_regresja)
+new.drzewo.reg$cptable
+prp(new.drzewo.reg)
+rsq.rpart(new.drzewo.reg)
+```
+
+### Sumy kwadratów reszt dla drzewa przyciętego
+
+Ponownie wartości sum kwadratów reszt są stosunkowo wysokie, lecz zmalało względem pierwszego drzewa.
+
+```{r}
+y <- nowa_regresja$amount
+sum((y-mean(y))^2)
+ss <- function (x) sum((x-mean(x))^2)
+ss(y)
+
+ss(y[nowa_regresja$listtype %in% c("ECOMMERCE")])
+ss(y[!(nowa_regresja$listtype %in% c("ECOMMERCE"))])
+```
+
+### Odczytanie ważności zmiennych
+
+W ponownie oszacowanym modelu najistotniejszymi zmiennymi okazały się:
+
+* **listtype**,
+* **expiryyear**,
+* **level**,
+* **mccname**,
+* **description**,
+* **expirymonth**,
+* **type**,
+* **acquirerconnectionmethod**,
+* **weekDay**,
+* **countrycode**,
+* **issuer**
+
+czyli dokładnie takie same, jak w przypadku modelu uwzględniającego wartości odbiegające.
+
+```{r}
+drzewo.reg$variable.importance
+```
+
+### Zbudowanie drzewa z parametrem cp = 0
+
+Ponownie oszacowano maksymalne drzewo - tym razem z 1771 punktami podziału.
+
+```{r fig.width=8, fig.height=8}
+new.drzewo.reg.big <- rpart(amount ~.-id-createtime, data = nowa_regresja, control = rpart.control(cp=0))
+plot(new.drzewo.reg.big)
+
+tail(new.drzewo.reg.big$cptable,15) 
+przycinanie <- function(new.drzewo.reg) {
+  bledy <- new.drzewo.reg$cptable
+  tmp1 <- which.min(bledy[, "xerror"])
+  tmp2 <- sum(bledy[tmp1, c("xerror", "xstd")])
+  optymalny <- which(bledy[, "xerror"] < tmp2)[1]
+  
+  prune(new.drzewo.reg, cp = bledy[optymalny, "CP"])
+}
+
+new.drzewo_przyciete.reg <- przycinanie(new.drzewo.reg.big)
+```
+
+### Przycięte drzewo regresyjne
+
+Przycięcie drzewa spowodowało redukcję liczby punktów podziału do 155.
+
+```{r fig.width=8, fig.height=6}
+plot(new.drzewo_przyciete.reg)
+rsq.rpart(new.drzewo_przyciete.reg)
+```
+
+### Ważne miary dla przyciętego i nowego drzewa
+
+Wartości wybranych miar uległy poprawie. Zmalał współczynnik indeterminacji, a zwiększyła się miara pseudo R2.
+
+```{r}
+sum((y - predict(new.drzewo_przyciete.reg))^2)
+ss(y)
+sum((y - predict(new.drzewo_przyciete.reg))^2)/ss(y)
+1 - sum((y - predict(new.drzewo_przyciete.reg))^2)/ss(y)
+
+drzewo.reg.pred.fin <- predict(new.drzewo_przyciete.reg, nowa_regresja)
+RMSE.reg.drzewo.final <- RMSE(pred = drzewo.reg.pred.fin, obs = nowa_regresja$amount)
+RMSE.reg.drzewo.final
+```
+
+### Zbudowanie modelu regresji liniowej
+
+W celach porównawczych zbudowano również model regresji liniowej. Miara RMSE dla regresji liniowej jest wyższa niż dla drzew regresyjnych. Zostawienie wyłącznie zmiennych istotnych statystycznie w modelu umożliwiłoby prawdopodobnie na zmniejszenie RMSE. 
+
+```{r}
+model <- lm(amount ~.-id-createtime, data = nowa_uczaca)
+summary(model)
+
+model.lm.pred <- predict(model, nowa_uczaca)
+RMSE.model <- RMSE(pred = model.lm.pred, obs = nowa_uczaca$amount)
+RMSE.model
+```
+
+### Zbudowanie modelu MARS
+
+Wyniki modelu MARS prezentują się w następujący sposób:
+
+```{r}
+mars1 <- earth(formula = amount ~ .-id-createtime,
+               data = nowa_uczaca,
+               trace = 3)
+
+m <- mars1$bx
+
+wezly <- mars1$dirs
+wezly2 <- mars1$cuts
+
+f2 <- mars1$prune.terms
+
+summary(mars1)
+mars1$gcv.per.subset
+```
+
+### Miara RMSE dla modelu MARS
+
+Miara RMSE oszacowana na podstawie modelu MARS jest większa niż pozostałe miary oszacowane na uprzednio zbudowanych modelach.
+
+```{r}
+pred.mars1 <- predict(mars1, nowa_uczaca)
+RMSE.mars <- RMSE(pred = pred.mars1, obs = nowa_uczaca$amount)
+RMSE.mars
+```
+
+### Wykresy informacyjne dla modelu MARS
+
+Na poniższych wykresach można zaobserwować zmiany wartości gcv w zależności od podziału drzewa oraz pozostałe informacje konieczne do analizy tego modelu.
+
+```{r}
+plot(mars1$gcv.per.subset)
+plot(mars1$rss.per.subset)
+plot(mars1, info = T)
+```
+
+___
+
+## **Porównanie miar RMSE dla zbudowanych modeli**
+
+Najmniejsza miara RMSE okazała się dla modelu drzewa regresyjnego, z którego usunięto obserwacje odbiegające. Ten zabieg pozwolił na zmniejszenie RMSE o około 50. Największe miary RMSE okazały się dla modelu MARS oraz dla modelu regresji liniowej.
+
+```{r fig.width=8}
+vec.names = c("Drzewo regresyjne", "Drzewo regresyjne bez obserwacji odbiegających", "Model regresji liniowej", "MARS")
+vec.rmse = c(RMSE.reg.drzewo.first, RMSE.reg.drzewo.final, RMSE.model, RMSE.mars)
+rmse.podsumowanie <- data.frame("Model" = vec.names,
+                                "RMSE" = vec.rmse)
+
+rmse.podsumowanie %>%
+  kbl(caption = "Wartość miar RMSE dla poszczególnych modeli") %>%
+  kable_paper("hover", full_width = F, position = "left")
+```
+
+#### Usunięcie niepasujących rekordów
+
+Usunięcie niepasujących rekordów jest konieczne, ponieważ w trakcie procesu ujednolicania poziomów zmiennych typu **factor** powstały wartości NA, które uniemożliwiały wykonanie poszczególnych funkcji. Sam proces ujednolicania poziomów również był konieczny do zrealizowania projektu, ponieważ tak jak w przypadku wartości NA, niektóre funkcje nie działały, gdy zmienne miały różne poziomy czynników.
+
+```{r}
+which(!(predykcje_testowa$id %in% proba_testowa_final$id))
+predykcje_testowa <- predykcje_testowa[-c(13079, 13080, 13081, 1991, 1992, 1993, 1994, 1995, 1996, 4167,
+                                          4174,  4175,  4176,  4177,  4178,  7076,  7077,  7994,  7995,  7996,  7997,  
+                                          7998,  7999,  8000,  8001,  8002, 8003,  8004, 8005,  8006,  8482,  8483,  
+                                          8484, 10077, 10078, 10079, 12583, 12584, 12585, 12586, 13079, 13080, 13081, 13340),]
+```
+
+___
+
+## **Zapisanie wartości zmiennej "amount" do próby testowej na podstawie modelu drzewa regresyjnego bez wartości odbiegających**
+
+Ostateczne wyniki, dokonane na próbie testowej zostały zapisane do pliku **predykcje_testowe.RData** oraz podsumowane poniżej.
+
+```{r}
+drzewo.reg.pred.fin <- predict(new.drzewo_przyciete.reg, proba_testowa_final)
+proba_testowa_final$amount <- drzewo.reg.pred.fin
+
+head(proba_testowa_final)
+tail(proba_testowa_final)
+summary(proba_testowa_final$amount)
+summary(proba_testowa_final$status)
+
+predykcje_testowa$amount <- proba_testowa_final$amount
+predykcje_testowa$status <- proba_testowa_final$status
+summary(predykcje_testowa)[,2:3]
+save(predykcje_testowa, file = "predykcje_testowe.RData")
+
+```
+
+___
+
+## **Podsumowanie wyników projektu**
+
+W przypadku modeli stworzonych na potrzeby zadania pierwszego, najlepszym modelem okazał się model **Random Forest**. Posiadał on największą miarę F oraz wysokie wartości pozostałych miar. Błąd OOB oraz błąd na zbiorze testowych (tu walidacyjnym) malał wraz ze wzrostem ilości generowanych drzew. W naszej opinii, ten model byłby najskuteczniejszy do klasyfikacji zmiennej **status** i modelowania badanego problemu.
+
+Modele stworzone do realizacji zadania drugiego miały na celu dokonać predykcji zmiennej ilościowej **amount**. Zostały zbudowane cztery takie modele i były to modele: drzewa regresyjnego, drzewa regresyjnego bez jednostek nietypowych, model regresji liniowej oraz MARS. Najlepszym modelem okazał się model **drzewa regresyjnego pozbawionego jednostek odbiegających**. Posiadał on najniższą miarę RMSE oraz najwyższy współczynnik pseudo-R2. Sam model jednak trudny jest do bezpośredniej interpretacji, ponieważ wygenerowany na jego podstawie wykres drzewa jest mało czytelny, lecz wartości obliczonych miar powodują, że do zbadania danego problemu, ten model okazał się odpowiedniejszy. 
+
